@@ -1089,6 +1089,7 @@ func (u *sqlSymUnion) filterType() tree.FilterType {
 %token <str> PLAN PLANS POINT POINTM POINTZ POINTZM POLICIES POLICY POLYGON POLYGONM POLYGONZ POLYGONZM
 %token <str> POSITION PRECEDING PRECISION PREPARE PREPARED PRESERVE PRIMARY PRIOR PRIORITY PRIVILEGES PUSH
 %token <str> PROCEDURAL PROCEDURE PROCEDURES PROVISIONED PROVISIONSRC PUBLIC PUBLICATION
+%token <str> QUALIFY
 
 %token <str> QUERIES QUERY QUOTE
 
@@ -1713,6 +1714,7 @@ func (u *sqlSymUnion) filterType() tree.FilterType {
 %type <tree.Expr> substr_from substr_for
 %type <tree.Expr> in_expr
 %type <tree.Expr> having_clause
+%type <tree.Expr> qualify_clause
 %type <tree.Expr> array_expr
 %type <tree.Expr> interval_value
 %type <[]tree.ResolvableTypeReference> type_list prep_type_clause
@@ -15299,6 +15301,7 @@ simple_select:
 //        [ GROUP BY <expr> [ , ... ] ]
 //        [ HAVING <expr> ]
 //        [ WINDOW <name> AS ( <definition> ) ]
+//        [ QUALIFY <expr> ]
 //        [ { UNION | INTERSECT | EXCEPT } [ ALL | DISTINCT ] <selectclause> ]
 //        [ ORDER BY <expr> [ ASC | DESC ] [, ...] ]
 //        [ LIMIT { <expr> | ALL } ]
@@ -15307,7 +15310,7 @@ simple_select:
 simple_select_clause:
   SELECT opt_all_clause opt_target_list
     from_clause opt_where_clause
-    group_clause having_clause window_clause
+    group_clause having_clause window_clause qualify_clause
   {
     $$.val = &tree.SelectClause{
       Exprs:   $3.selExprs(),
@@ -15316,11 +15319,12 @@ simple_select_clause:
       GroupBy: $6.groupBy(),
       Having:  tree.NewWhere(tree.AstHaving, $7.expr()),
       Window:  $8.window(),
+      Qualify: tree.NewWhere(tree.AstQualify, $9.expr()),
     }
   }
 | SELECT distinct_clause target_list
     from_clause opt_where_clause
-    group_clause having_clause window_clause
+    group_clause having_clause window_clause qualify_clause
   {
     $$.val = &tree.SelectClause{
       Distinct: $2.bool(),
@@ -15330,11 +15334,12 @@ simple_select_clause:
       GroupBy:  $6.groupBy(),
       Having:   tree.NewWhere(tree.AstHaving, $7.expr()),
       Window:   $8.window(),
+      Qualify:  tree.NewWhere(tree.AstQualify, $9.expr()),
     }
   }
 | SELECT distinct_on_clause target_list
     from_clause opt_where_clause
-    group_clause having_clause window_clause
+    group_clause having_clause window_clause qualify_clause
   {
     $$.val = &tree.SelectClause{
       Distinct:   true,
@@ -15345,6 +15350,7 @@ simple_select_clause:
       GroupBy:    $6.groupBy(),
       Having:     tree.NewWhere(tree.AstHaving, $7.expr()),
       Window:     $8.window(),
+      Qualify:    tree.NewWhere(tree.AstQualify, $9.expr()),
     }
   }
 
@@ -15764,6 +15770,19 @@ group_by_item:
 
 having_clause:
   HAVING a_expr
+  {
+    $$.val = $2.expr()
+  }
+| /* EMPTY */
+  {
+    $$.val = tree.Expr(nil)
+  }
+
+// QUALIFY filters the results of window functions, analogous to HAVING for
+// aggregate functions. It is evaluated after window functions are computed
+// and before DISTINCT/ORDER BY/LIMIT.
+qualify_clause:
+  QUALIFY a_expr
   {
     $$.val = $2.expr()
   }
@@ -20797,6 +20816,7 @@ reserved_keyword:
 | ORDER
 | PLACING
 | PRIMARY
+| QUALIFY
 | REFERENCES
 | RETURNING
 | SELECT

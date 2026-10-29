@@ -785,6 +785,7 @@ var nonBareLabelKeywords = map[string]struct{}{
 	"OVER":      {},
 	"OVERLAPS":  {},
 	"PRECISION": {},
+	"QUALIFY":   {},
 	"RETURNING": {},
 	"SECOND":    {},
 	"TO":        {},

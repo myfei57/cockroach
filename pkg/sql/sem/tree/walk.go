@@ -2017,6 +2017,10 @@ func (stmt *SelectClause) copyNode() *SelectClause {
 		hCopy := *stmt.Having
 		stmtCopy.Having = &hCopy
 	}
+	if stmt.Qualify != nil {
+		qCopy := *stmt.Qualify
+		stmtCopy.Qualify = &qCopy
+	}
 	stmtCopy.Window = append(Window(nil), stmt.Window...)
 	stmtCopy.DistinctOn = append(DistinctOn(nil), stmt.DistinctOn...)
 	return &stmtCopy
@@ -2073,6 +2077,16 @@ func (stmt *SelectClause) walkStmt(v Visitor) Statement {
 				ret = stmt.copyNode()
 			}
 			ret.Having.Expr = e
+		}
+	}
+
+	if stmt.Qualify != nil {
+		e, changed := WalkExpr(v, stmt.Qualify.Expr)
+		if changed {
+			if ret == stmt {
+				ret = stmt.copyNode()
+			}
+			ret.Qualify.Expr = e
 		}
 	}
 

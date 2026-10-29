@@ -83,6 +83,7 @@ type SelectClause struct {
 	GroupBy     GroupBy
 	Window      Window
 	Having      *Where
+	Qualify     *Where
 	Where       *Where
 	Distinct    bool
 	TableSelect bool
@@ -132,6 +133,10 @@ func (node *SelectClause) Format(ctx *FmtCtx) {
 		if len(node.Window) > 0 {
 			ctx.WriteByte(' ')
 			ctx.FormatNode(&node.Window)
+		}
+		if node.Qualify != nil {
+			ctx.WriteByte(' ')
+			ctx.FormatNode(node.Qualify)
 		}
 	}
 }
@@ -798,8 +803,9 @@ type Where struct {
 
 // Where.Type
 const (
-	AstWhere  = "WHERE"
-	AstHaving = "HAVING"
+	AstWhere   = "WHERE"
+	AstHaving  = "HAVING"
+	AstQualify = "QUALIFY"
 )
 
 // NewWhere creates a WHERE or HAVING clause out of an Expr. If the expression

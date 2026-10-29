@@ -2937,3 +2937,68 @@ SELECT 123 AS of FROM t -- normalized!
 SELECT (123) AS of FROM t -- fully parenthesized
 SELECT _ AS of FROM t -- literals removed
 SELECT 123 AS _ FROM _ -- identifiers removed
+
+# QUALIFY clause.
+parse
+SELECT a, row_number() OVER () AS rn FROM t QUALIFY rn = 1
+----
+SELECT a, row_number() OVER () AS rn FROM t QUALIFY rn = 1
+SELECT (a), (row_number() OVER ()) AS rn FROM t QUALIFY ((rn) = (1)) -- fully parenthesized
+SELECT a, row_number() OVER () AS rn FROM t QUALIFY rn = _ -- literals removed
+SELECT _, _() OVER () AS _ FROM _ QUALIFY _ = 1 -- identifiers removed
+
+parse
+SELECT a FROM t QUALIFY row_number() OVER (PARTITION BY a) = 1
+----
+SELECT a FROM t QUALIFY row_number() OVER (PARTITION BY a) = 1
+SELECT (a) FROM t QUALIFY ((row_number() OVER (PARTITION BY (a))) = (1)) -- fully parenthesized
+SELECT a FROM t QUALIFY row_number() OVER (PARTITION BY a) = _ -- literals removed
+SELECT _ FROM _ QUALIFY _() OVER (PARTITION BY _) = 1 -- identifiers removed
+
+parse
+SELECT a FROM t WINDOW w AS (PARTITION BY a) QUALIFY rank() OVER w = 1
+----
+SELECT a FROM t WINDOW w AS (PARTITION BY a) QUALIFY rank() OVER w = 1
+SELECT (a) FROM t WINDOW w AS (PARTITION BY (a)) QUALIFY ((rank() OVER w) = (1)) -- fully parenthesized
+SELECT a FROM t WINDOW w AS (PARTITION BY a) QUALIFY rank() OVER w = _ -- literals removed
+SELECT _ FROM _ WINDOW _ AS (PARTITION BY _) QUALIFY _() OVER _ = 1 -- identifiers removed
+
+parse
+SELECT DISTINCT a FROM t QUALIFY a > 0 ORDER BY a LIMIT 1
+----
+SELECT DISTINCT a FROM t QUALIFY a > 0 ORDER BY a LIMIT 1
+SELECT DISTINCT (a) FROM t QUALIFY ((a) > (0)) ORDER BY (a) LIMIT (1) -- fully parenthesized
+SELECT DISTINCT a FROM t QUALIFY a > _ ORDER BY a LIMIT _ -- literals removed
+SELECT DISTINCT _ FROM _ QUALIFY _ > 0 ORDER BY _ LIMIT 1 -- identifiers removed
+
+parse
+SELECT * FROM (SELECT a, rank() OVER () AS r FROM t QUALIFY r = 1)
+----
+SELECT * FROM (SELECT a, rank() OVER () AS r FROM t QUALIFY r = 1)
+SELECT (*) FROM ((SELECT (a), (rank() OVER ()) AS r FROM t QUALIFY ((r) = (1)))) -- fully parenthesized
+SELECT * FROM (SELECT a, rank() OVER () AS r FROM t QUALIFY r = _) -- literals removed
+SELECT * FROM (SELECT _, _() OVER () AS _ FROM _ QUALIFY _ = 1) -- identifiers removed
+
+parse
+SELECT a FROM t GROUP BY a HAVING count(*) > 0 QUALIFY rank() OVER (ORDER BY a) = 1
+----
+SELECT a FROM t GROUP BY a HAVING count(*) > 0 QUALIFY rank() OVER (ORDER BY a) = 1
+SELECT (a) FROM t GROUP BY (a) HAVING ((count((*))) > (0)) QUALIFY ((rank() OVER (ORDER BY (a))) = (1)) -- fully parenthesized
+SELECT a FROM t GROUP BY a HAVING count(*) > _ QUALIFY rank() OVER (ORDER BY a) = _ -- literals removed
+SELECT _ FROM _ GROUP BY _ HAVING _(*) > 0 QUALIFY _() OVER (ORDER BY _) = 1 -- identifiers removed
+
+error
+SELECT qualify FROM t
+----
+at or near "from": syntax error
+DETAIL: source SQL:
+SELECT qualify FROM t
+               ^
+
+error
+SELECT a FROM t QUALIFY
+----
+at or near "EOF": syntax error
+DETAIL: source SQL:
+SELECT a FROM t QUALIFY
+                       ^

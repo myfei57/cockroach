@@ -1,0 +1,294 @@
+# Tests for the QUALIFY clause.
+
+exec-ddl
+CREATE TABLE kv (
+  k INT PRIMARY KEY,
+  v INT,
+  w INT,
+  s STRING,
+  FAMILY (k, v, w),
+  FAMILY (s)
+)
+----
+
+# QUALIFY filters the window function result and the hidden window column
+# must not leak into the output columns.
+build
+SELECT k, row_number() OVER (PARTITION BY v ORDER BY k) AS rn
+FROM kv
+QUALIFY rn = 1
+----
+project
+ ├── columns: k:1!null rn:7!null
+ └── select
+      ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6 row_number:7!null
+      ├── window partition=(2) ordering=+1
+      │    ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6 row_number:7
+      │    ├── scan kv
+      │    │    └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      │    └── windows
+      │         └── row-number [as=row_number:7]
+      └── filters
+           └── row_number:7 = 1
+
+# A window function that appears only in QUALIFY (not in the SELECT list) is
+# computed as a hidden column and does not leak into the projection.
+build
+SELECT k FROM kv QUALIFY row_number() OVER (PARTITION BY v ORDER BY k) = 1
+----
+project
+ ├── columns: k:1!null
+ └── select
+      ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6 row_number:7!null
+      ├── window partition=(2) ordering=+1
+      │    ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6 row_number:7
+      │    ├── scan kv
+      │    │    └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      │    └── windows
+      │         └── row-number [as=row_number:7]
+      └── filters
+           └── row_number:7 = 1
+
+# QUALIFY can reference a SELECT alias whose expression is not itself a window
+# function, as long as the name is not also an input column.
+build
+SELECT k + 1 AS kk FROM kv QUALIFY kk = 2
+----
+project
+ ├── columns: kk:7!null
+ ├── select
+ │    ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │    ├── scan kv
+ │    │    └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │    └── filters
+ │         └── (k:1 + 1) = 2
+ └── projections
+      └── k:1 + 1 [as=kk:7]
+
+# QUALIFY is evaluated after the aggregation when GROUP BY is present.
+build
+SELECT v, count(*) AS c FROM kv GROUP BY v QUALIFY c > 1
+----
+select
+ ├── columns: v:2 c:7!null
+ ├── group-by (hash)
+ │    ├── columns: v:2 count_rows:7!null
+ │    ├── grouping columns: v:2
+ │    ├── project
+ │    │    ├── columns: v:2
+ │    │    └── scan kv
+ │    │         └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │    └── aggregations
+ │         └── count-rows [as=count_rows:7]
+ └── filters
+      └── count_rows:7 > 1
+
+# An aggregate can appear directly in QUALIFY, just like in HAVING.
+build
+SELECT v FROM kv GROUP BY v QUALIFY count(*) > 1 AND max(k) > 0
+----
+project
+ ├── columns: v:2
+ └── select
+      ├── columns: v:2 count_rows:7!null max:8!null
+      ├── group-by (hash)
+      │    ├── columns: v:2 count_rows:7!null max:8!null
+      │    ├── grouping columns: v:2
+      │    ├── project
+      │    │    ├── columns: k:1!null v:2
+      │    │    └── scan kv
+      │    │         └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      │    └── aggregations
+      │         ├── count-rows [as=count_rows:7]
+      │         └── max [as=max:8]
+      │              └── k:1
+      └── filters
+           └── (count_rows:7 > 1) AND (max:8 > 0)
+
+# QUALIFY works together with HAVING: HAVING filters groups, QUALIFY filters
+# the rows produced by the window function over those groups.
+build
+SELECT v, rank() OVER (PARTITION BY v ORDER BY k) AS r
+FROM kv
+GROUP BY v, k
+HAVING count(*) > 0
+QUALIFY r = 1
+----
+project
+ ├── columns: v:2 r:7!null
+ └── select
+      ├── columns: k:1!null v:2 rank:7!null count_rows:8!null
+      ├── window partition=(2) ordering=+1
+      │    ├── columns: k:1!null v:2 rank:7 count_rows:8!null
+      │    ├── select
+      │    │    ├── columns: k:1!null v:2 count_rows:8!null
+      │    │    ├── group-by (hash)
+      │    │    │    ├── columns: k:1!null v:2 count_rows:8!null
+      │    │    │    ├── grouping columns: k:1!null v:2
+      │    │    │    ├── project
+      │    │    │    │    ├── columns: k:1!null v:2
+      │    │    │    │    └── scan kv
+      │    │    │    │         └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      │    │    │    └── aggregations
+      │    │    │         └── count-rows [as=count_rows:8]
+      │    │    └── filters
+      │    │         └── count_rows:8 > 0
+      │    └── windows
+      │         └── rank [as=rank:7]
+      └── filters
+           └── rank:7 = 1
+
+# QUALIFY is applied before DISTINCT.
+build
+SELECT DISTINCT v FROM kv QUALIFY row_number() OVER (PARTITION BY v) = 1
+----
+distinct-on
+ ├── columns: v:2
+ ├── grouping columns: v:2
+ └── project
+      ├── columns: v:2
+      └── select
+           ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6 row_number:7!null
+           ├── window partition=(2)
+           │    ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6 row_number:7
+           │    ├── scan kv
+           │    │    └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+           │    └── windows
+           │         └── row-number [as=row_number:7]
+           └── filters
+                └── row_number:7 = 1
+
+# FALSE and NULL filters discard all rows (the filter is still built).
+build
+SELECT k FROM kv QUALIFY FALSE
+----
+project
+ ├── columns: k:1!null
+ └── select
+      ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      ├── scan kv
+      │    └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      └── filters
+           └── false
+
+build
+SELECT k FROM kv QUALIFY NULL
+----
+project
+ ├── columns: k:1!null
+ └── select
+      ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      ├── scan kv
+      │    └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      └── filters
+           └── NULL::BOOL
+
+# The QUALIFY expression must have boolean type.
+build
+SELECT k FROM kv QUALIFY 1
+----
+error (42804): argument of QUALIFY must be type bool, not type int
+
+build
+SELECT k FROM kv QUALIFY 'x'
+----
+error (22P02): could not parse "x" as type bool: invalid bool value
+
+# A bare name that matches both a SELECT alias and an input column is
+# ambiguous.
+build
+SELECT k, v FROM kv QUALIFY v > 1
+----
+error (42702): column reference "v" is ambiguous
+
+# A duplicate SELECT alias referenced from QUALIFY is ambiguous, even when the
+# underlying expressions are identical.
+build
+SELECT k AS x, k AS x FROM kv QUALIFY x = 1
+----
+error (42P09): QUALIFY "x" is ambiguous
+
+# Names that are not output aliases still resolve as input column references.
+build
+SELECT k AS kk FROM kv QUALIFY v > 1
+----
+project
+ ├── columns: kk:1!null
+ └── select
+      ├── columns: k:1!null v:2!null w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      ├── scan kv
+      │    └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      └── filters
+           └── v:2 > 1
+
+# QUALIFY rejects set-returning functions.
+build
+SELECT k FROM kv QUALIFY generate_series(1, 3) = 2
+----
+error (0A000): generate_series(): set-returning functions are not allowed in QUALIFY
+
+# QUALIFY rejects nested window functions inside aggregates.
+build
+SELECT k FROM kv QUALIFY sum(row_number() OVER ()) > 1
+----
+error (42P20): sum(): row_number(): window functions are not allowed in aggregate
+
+# QUALIFY rejects nested window functions.
+build
+SELECT k FROM kv QUALIFY rank() OVER (PARTITION BY row_number() OVER ()) = 1
+----
+error (42P20): row_number(): window function calls cannot be nested
+
+# FOR UPDATE cannot be combined with QUALIFY.
+build
+SELECT 1 FROM kv QUALIFY TRUE FOR UPDATE
+----
+error (0A000): FOR UPDATE is not allowed with QUALIFY clause
+
+# QUALIFY in a subquery.
+build
+SELECT * FROM (SELECT k, rank() OVER () AS r FROM kv QUALIFY r = 1)
+----
+project
+ ├── columns: k:1!null r:7!null
+ └── select
+      ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6 rank:7!null
+      ├── window partition=()
+      │    ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6 rank:7
+      │    ├── scan kv
+      │    │    └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      │    └── windows
+      │         └── rank [as=rank:7]
+      └── filters
+           └── rank:7 = 1
+
+# QUALIFY interacts correctly with the outer ORDER BY and LIMIT; the ORDER BY
+# still resolves the output alias independently of QUALIFY.
+build
+SELECT k, row_number() OVER (ORDER BY k) AS rn
+FROM kv
+QUALIFY rn > 1
+ORDER BY rn DESC
+LIMIT 1
+----
+limit
+ ├── columns: k:1!null rn:7!null
+ ├── internal-ordering: -7
+ ├── ordering: -7
+ ├── sort
+ │    ├── columns: k:1!null row_number:7!null
+ │    ├── ordering: -7
+ │    ├── limit hint: 1.00
+ │    └── project
+ │         ├── columns: k:1!null row_number:7!null
+ │         └── select
+ │              ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6 row_number:7!null
+ │              ├── window partition=() ordering=+1
+ │              │    ├── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6 row_number:7
+ │              │    ├── scan kv
+ │              │    │    └── columns: k:1!null v:2 w:3 s:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │              │    └── windows
+ │              │         └── row-number [as=row_number:7]
+ │              └── filters
+ │                   └── row_number:7 > 1
+ └── 1

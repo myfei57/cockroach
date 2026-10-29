@@ -61,6 +61,7 @@ var SQLPasses = []reduce.Pass{
 	removeJoins,
 	removeWhere,
 	removeHaving,
+	removeQualify,
 	removeDistinct,
 	simplifyOnCond,
 	simplifyVal,
@@ -296,6 +297,9 @@ func (w sqlWalker) Transform(s string, i int) (out string, ok bool, err error) {
 				}
 				if node.Having != nil {
 					walk(node.Having)
+				}
+				if node.Qualify != nil {
+					walk(node.Qualify)
 				}
 				for _, table := range node.From.Tables {
 					walk(table)
@@ -1130,6 +1134,19 @@ var (
 			if node.Having != nil {
 				if xf {
 					node.Having = nil
+				}
+				return 1
+			}
+		}
+		return 0
+	})
+	removeQualify = walkSQL("remove QUALIFY", func(xfi int, node interface{}) int {
+		xf := xfi == 0
+		switch node := node.(type) {
+		case *tree.SelectClause:
+			if node.Qualify != nil {
+				if xf {
+					node.Qualify = nil
 				}
 				return 1
 			}

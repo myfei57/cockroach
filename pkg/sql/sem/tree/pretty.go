@@ -673,6 +673,7 @@ func (node *SelectClause) docTable(p *PrettyCfg) []pretty.TableRow {
 		node.GroupBy.docRow(p),
 		node.Having.docRow(p),
 		node.Window.docRow(p),
+		node.Qualify.docRow(p),
 	}
 }
 

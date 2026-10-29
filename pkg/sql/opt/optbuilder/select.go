@@ -1298,6 +1298,10 @@ func (b *Builder) buildSelectClause(
 	// Any aggregates in the HAVING, ORDER BY and DISTINCT ON clauses (if they
 	// exist) will be added here.
 	havingExpr := b.analyzeHaving(sel.Having, fromScope)
+	// QUALIFY can reference SELECT output aliases, so it is analyzed after the
+	// projection list. Any window/aggregate functions in it are registered in
+	// fromScope here.
+	qualifyExpr := b.analyzeQualify(sel.Qualify, fromScope, projectionsScope)
 	orderByScope := b.analyzeOrderBy(orderBy, fromScope, projectionsScope,
 		exprKindOrderBy, tree.RejectGenerators)
 	distinctOnScope := b.analyzeDistinctOnArgs(sel.DistinctOn, fromScope, projectionsScope)
@@ -1331,6 +1335,12 @@ func (b *Builder) buildSelectClause(
 
 	b.buildWindow(outScope, fromScope)
 	b.validateLockingInFrom(sel, lockCtx.locking, fromScope)
+
+	// QUALIFY is evaluated after window functions have been computed and
+	// before the final projection and DISTINCT, so that filtered rows are
+	// removed before DISTINCT and any hidden window expressions used by the
+	// filter do not leak into the output columns.
+	b.buildQualify(qualifyExpr, outScope, fromScope)
 
 	if preProjectionScope != nil {
 		// Construct the pre-projection for the ordering expressions.
@@ -1606,6 +1616,9 @@ func (b *Builder) validateLockingInFrom(
 
 	case sel.Having != nil:
 		b.raiseLockingContextError(locking, "HAVING clause")
+
+	case sel.Qualify != nil:
+		b.raiseLockingContextError(locking, "QUALIFY clause")
 
 	case fromScope.groupby != nil && fromScope.groupby.hasAggregates():
 		b.raiseLockingContextError(locking, "aggregate functions")
