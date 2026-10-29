@@ -22,6 +22,7 @@ import (
 	"math/bits"
 	"net"
 	"regexp/syntax"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -2868,6 +2869,35 @@ var regularBuiltins = map[string]builtinDefinition{
 			},
 			Info:       "Convert a string to a date using the given format.",
 			Volatility: volatility.Stable,
+		},
+	),
+
+	"add_business_days": makeBuiltin(
+		tree.FunctionProperties{Category: builtinconstants.CategoryDateAndTime},
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "start_date", Typ: types.Date},
+				{Name: "day_count", Typ: types.Int},
+				{Name: "holidays", Typ: types.DateArray},
+			},
+			ReturnType: tree.FixedReturnType(types.Date),
+			Fn:         addBusinessDays,
+			Info: "Shifts `start_date` by `day_count` business days and returns the resulting date." + `
+A business day is a weekday (Monday through Friday) that is not listed in the
+caller-provided ` + "`holidays`" + ` set. A positive ` + "`day_count`" + ` moves forward in time and a
+negative value moves backward; the start date itself is never counted. A
+` + "`day_count`" + ` of zero returns ` + "`start_date`" + ` unchanged, even when it falls on a weekend or
+holiday.
+
+The ` + "`holidays`" + ` array may be empty or NULL (treated as an empty set), may contain
+duplicates (which count only once) or NULL elements (which are ignored), and
+dates falling on a weekend have no additional effect. Returns NULL when
+` + "`start_date`" + ` or ` + "`day_count`" + ` is NULL. Infinite dates are not accepted, and an error is
+returned if the result lies outside the range of the DATE type. The
+calculation uses only the calendar and is unaffected by the session time zone
+and daylight saving time.`,
+			Volatility:        volatility.Immutable,
+			CalledOnNullInput: true,
 		},
 	),
 
@@ -10838,6 +10868,183 @@ func currentDate(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (
 	t := evalCtx.GetTxnTimestamp(time.Microsecond).Time
 	t = t.In(evalCtx.GetLocation())
 	return tree.NewDDateFromTime(t)
+}
+
+// addBusinessDays implements the add_business_days builtin.
+func addBusinessDays(_ context.Context, _ *eval.Context, args tree.Datums) (tree.Datum, error) {
+	// The overload is marked CalledOnNullInput so that a NULL holidays array
+	// can be treated as an empty set; NULL values for the other two arguments
+	// still produce NULL according to SQL's three-valued logic.
+	if args[0] == tree.DNull || args[1] == tree.DNull {
+		return tree.DNull, nil
+	}
+	start := tree.MustBeDDate(args[0])
+	dayCount := int64(tree.MustBeDInt(args[1]))
+	if !start.IsFinite() {
+		return nil, pgerror.Newf(pgcode.DatetimeFieldOverflow,
+			"cannot add business days to infinite date %s", start)
+	}
+
+	holidays := businessDayHolidaySet(args[2])
+
+	// Zero business days returns the start date unchanged, regardless of
+	// whether the start date itself is a weekend day or a holiday.
+	if dayCount == 0 {
+		return tree.NewDDate(start.Date), nil
+	}
+
+	startDays := int64(start.PGEpochDays())
+	var resultDays int64
+	if dayCount > 0 {
+		high := int64(pgdate.HighDate.PGEpochDays())
+		available := countBusinessDaysForward(startDays, high, holidays)
+		if dayCount > available {
+			return nil, pgerror.Newf(pgcode.DatetimeFieldOverflow,
+				"%s + %d business days is out of range", start, dayCount)
+		}
+		// Find the earliest date end such that the half-open interval
+		// (start, end] contains exactly dayCount business days.
+		lo, hi := startDays+1, high
+		for lo < hi {
+			mid := lo + (hi-lo)/2
+			if countBusinessDaysForward(startDays, mid, holidays) >= dayCount {
+				hi = mid
+			} else {
+				lo = mid + 1
+			}
+		}
+		resultDays = lo
+	} else {
+		low := int64(pgdate.LowDate.PGEpochDays())
+		available := countBusinessDaysBackward(startDays, low, holidays)
+		// Compare without negating dayCount so that math.MinInt64 is handled
+		// without an overflow.
+		if dayCount < -available {
+			return nil, pgerror.Newf(pgcode.DatetimeFieldOverflow,
+				"%s - %d business days is out of range", start, -dayCount)
+		}
+		count := -dayCount
+		// Find the latest date end such that the half-open interval
+		// [end, start) contains exactly -dayCount business days.
+		lo, hi := low, startDays-1
+		for lo < hi {
+			mid := lo + (hi-lo+1)/2
+			if countBusinessDaysBackward(startDays, mid, holidays) >= count {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		resultDays = lo
+	}
+
+	result, err := pgdate.MakeDateFromPGEpoch(int32(resultDays))
+	if err != nil {
+		return nil, err
+	}
+	return tree.NewDDate(result), nil
+}
+
+// businessDayHolidaySet converts the holidays DATE[] argument into a sorted,
+// de-duplicated list of finite weekday dates expressed as PostgreSQL epoch
+// days. A NULL array is treated as an empty set; NULL elements are skipped;
+// repeated dates count only once; infinite dates can never coincide with a
+// finite result; and weekend dates are already excluded by the weekend rule.
+func businessDayHolidaySet(arg tree.Datum) []int32 {
+	if arg == tree.DNull {
+		return nil
+	}
+	var holidays []int32
+	for _, elem := range tree.MustBeDArray(arg).Array {
+		if elem == tree.DNull {
+			continue
+		}
+		d := tree.MustBeDDate(elem)
+		if d.IsFinite() && dateIsWeekday(d.PGEpochDays()) {
+			holidays = append(holidays, d.PGEpochDays())
+		}
+	}
+	sort.Slice(holidays, func(i, j int) bool { return holidays[i] < holidays[j] })
+	// De-duplicate in place.
+	if len(holidays) > 1 {
+		out := holidays[:1]
+		for _, h := range holidays[1:] {
+			if h != out[len(out)-1] {
+				out = append(out, h)
+			}
+		}
+		holidays = out
+	}
+	return holidays
+}
+
+// dateIsWeekday reports whether the given PostgreSQL epoch day (number of
+// days since 2000-01-01) is a Monday through Friday. The epoch day 0 was a
+// Saturday, so Saturdays have index 0 (mod 7) and Sundays index 1 (mod 7).
+// The calculation is pure calendar arithmetic and therefore independent of
+// the session time zone and daylight saving time.
+func dateIsWeekday(days int32) bool {
+	r := int64(days) % 7
+	if r < 0 {
+		r += 7
+	}
+	return r != 0 && r != 1
+}
+
+// floorDiv7 returns the mathematical floor of a/7 (Go's integer division
+// truncates towards zero).
+func floorDiv7(a int64) int64 {
+	q := a / 7
+	if a < 0 && a%7 != 0 {
+		q--
+	}
+	return q
+}
+
+// countResidueInRange returns the number of integers in the inclusive range
+// [lo, hi] (lo <= hi) that are congruent to r modulo 7.
+func countResidueInRange(lo, hi, r int64) int64 {
+	return floorDiv7(hi-r) - floorDiv7(lo-1-r)
+}
+
+// countWeekendDaysInRange returns the number of Saturdays (index 0 mod 7) and
+// Sundays (index 1 mod 7) in the inclusive range [lo, hi].
+func countWeekendDaysInRange(lo, hi int64) int64 {
+	return countResidueInRange(lo, hi, 0) + countResidueInRange(lo, hi, 1)
+}
+
+// countHolidaysInRange returns the number of entries of the sorted,
+// de-duplicated holidays slice that fall in the inclusive range [lo, hi].
+func countHolidaysInRange(holidays []int32, lo, hi int64) int64 {
+	first := sort.Search(len(holidays), func(i int) bool {
+		return int64(holidays[i]) >= lo
+	})
+	afterLast := sort.Search(len(holidays), func(i int) bool {
+		return int64(holidays[i]) > hi
+	})
+	return int64(afterLast - first)
+}
+
+// countBusinessDaysForward returns the number of business days in the
+// half-open interval (start, end], where start < end.
+func countBusinessDaysForward(start, end int64, holidays []int32) int64 {
+	if end <= start {
+		return 0
+	}
+	return (end - start) -
+		countWeekendDaysInRange(start+1, end) -
+		countHolidaysInRange(holidays, start+1, end)
+}
+
+// countBusinessDaysBackward returns the number of business days in the
+// half-open interval [end, start), where end < start.
+func countBusinessDaysBackward(start, end int64, holidays []int32) int64 {
+	if end >= start {
+		return 0
+	}
+	return (start - end) -
+		countWeekendDaysInRange(end, start-1) -
+		countHolidaysInRange(holidays, end, start-1)
 }
 
 var (

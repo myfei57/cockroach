@@ -545,6 +545,20 @@ value if you rely on the HLC for accuracy.</p>
 <table>
 <thead><tr><th>Function &rarr; Returns</th><th>Description</th><th>Volatility</th></tr></thead>
 <tbody>
+<tr><td><a name="add_business_days"></a><code>add_business_days(start_date: <a href="date.html">date</a>, day_count: <a href="int.html">int</a>, holidays: <a href="date.html">date</a>[]) &rarr; <a href="date.html">date</a></code></td><td><span class="funcdesc"><p>Shifts <code>start_date</code> by <code>day_count</code> business days and returns the resulting date.</p>
+<p>A business day is a weekday (Monday through Friday) that is not listed in the
+caller-provided <code>holidays</code> set. A positive <code>day_count</code> moves forward in time and a
+negative value moves backward; the start date itself is never counted. A
+<code>day_count</code> of zero returns <code>start_date</code> unchanged, even when it falls on a weekend or
+holiday.</p>
+<p>The <code>holidays</code> array may be empty or NULL (treated as an empty set), may contain
+duplicates (which count only once) or NULL elements (which are ignored), and
+dates falling on a weekend have no additional effect. Returns NULL when
+<code>start_date</code> or <code>day_count</code> is NULL. Infinite dates are not accepted, and an error is
+returned if the result lies outside the range of the DATE type. The
+calculation uses only the calendar and is unaffected by the session time zone
+and daylight saving time.</p>
+</span></td><td>Immutable</td></tr>
 <tr><td><a name="age"></a><code>age(end: <a href="timestamp.html">timestamptz</a>, begin: <a href="timestamp.html">timestamptz</a>) &rarr; <a href="interval.html">interval</a></code></td><td><span class="funcdesc"><p>Calculates the interval between <code>begin</code> and <code>end</code>, normalized into years, months and days.</p>
 <p>Note this may not be an accurate time span since years and months are normalized
 from days, and years and months are out of context. To avoid normalizing days into
