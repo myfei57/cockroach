@@ -530,6 +530,25 @@ var generators = map[string]builtinDefinition{
 		),
 	),
 
+	"url_query_params": makeBuiltin(genProps(),
+		makeGeneratorOverload(
+			tree.ParamTypes{{Name: "url", Typ: types.String}},
+			urlQueryParamsGeneratorType,
+			makeURLQueryParamsGenerator,
+			"Expands the query component of an absolute or relative URL into a set of rows."+
+				" The query component starts after the first '?' and the fragment (after '#') "+
+				"is ignored. Parameters are split on literal '&' characters, empty segments "+
+				"are ignored, and each parameter is split at its first '=' character. "+
+				"Each returned row contains the 1-based `ordinal`, the decoded `name`, the "+
+				"decoded `value`, and `has_equals`, which is false only when the parameter has "+
+				"no '=' character. Duplicate parameters are preserved in their original order. "+
+				"Names and values are decoded as application/x-www-form-urlencoded, with '+' "+
+				"interpreted as a space. Returns no rows for NULL input or when the URL has no "+
+				"query parameters.",
+			volatility.Immutable,
+		),
+	),
+
 	"crdb_internal.unary_table": makeBuiltin(genProps(),
 		makeGeneratorOverload(
 			tree.ParamTypes{},

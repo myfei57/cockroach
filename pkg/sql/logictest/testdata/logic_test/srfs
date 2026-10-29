@@ -1578,4 +1578,121 @@ SELECT u.x, unnest.unnest FROM unnest AS u, unnest(ARRAY[10, 20])
 statement ok
 DROP TABLE unnest
 
+subtest url_query_params
+
+# The canonical example: duplicate parameters are preserved in order, a
+# parameter without '=' has an empty value with has_equals = false, and an
+# explicit empty value is retained.
+query ITTB colnames,nosort
+SELECT * FROM url_query_params('/x?tag=a&tag=b&flag&empty=')
+----
+ordinal  name  value  has_equals
+1  tag  a  true
+2  tag  b  true
+3  flag  ·  false
+4  empty  ·  true
+
+# Absolute URL: the scheme/host/path are ignored and the fragment terminates
+# the query component. Percent escapes (including encoded '&', '/', '=' and
+# ';') are decoded, and a literal ';' is an ordinary character.
+query TT nosort
+SELECT name, value FROM url_query_params(
+  'https://user@example.com:8443/a?na%20me=va%3Dlue%26%2f%3Bs&x#frag?ignored=1')
+----
+na me  va=lue&/;s
+x  ·
+
+# '+' is decoded as a space and raw multibyte UTF-8 is preserved.
+query TT nosort
+SELECT name, value FROM url_query_params('?q=a+b%20c&%E4%BD%A0=%E5%A5%BD+%2B')
+----
+q  a b c
+你  好 +
+
+# Explicitly empty names and values are retained. Only the first '=' separates.
+query ITTB nosort
+SELECT * FROM url_query_params('?=x&a=&b=c=d&%20=+')
+----
+1  ·  x  true
+2  a  ·  true
+3  b  c=d  true
+4  ·  ·  true
+
+# Empty segments caused by consecutive, leading or trailing '&' are ignored,
+# while ordinals stay continuous.
+query I nosort
+SELECT ordinal FROM url_query_params('?&&a=1&&b=2&')
+----
+1
+2
+
+# A trailing '#' still yields the parameters before it.
+query TT nosort
+SELECT name, value FROM url_query_params('?a=1#')
+----
+a  1
+
+# No query component, an empty query, a NULL input, and a fragment-only URL
+# all produce zero rows.
+query ITTB
+SELECT * FROM url_query_params('/no/query')
+----
+
+query ITTB
+SELECT * FROM url_query_params('?')
+----
+
+query ITTB
+SELECT * FROM url_query_params(NULL)
+----
+
+query ITTB
+SELECT * FROM url_query_params('/p#frag?a=1')
+----
+
+# Malformed percent escapes produce an error.
+statement error pgcode 22025 invalid URL escape
+SELECT * FROM url_query_params('/x?a=%zz')
+
+statement error pgcode 22025 invalid URL escape
+SELECT * FROM url_query_params('/x?a=%4')
+
+# A decoded value that is not valid UTF-8 produces an error.
+statement error pgcode 22021 invalid byte sequence for encoding
+SELECT * FROM url_query_params('/x?a=%FF')
+
+# The function name is case-insensitive.
+query I nosort
+SELECT ordinal FROM URL_Query_Params('?a=1')
+----
+1
+
+# LATERAL usage against a table, including rows with NULL URLs or no query
+# component (which contribute no rows).
+statement ok
+CREATE TABLE urls (id INT PRIMARY KEY, u STRING)
+
+statement ok
+INSERT INTO urls VALUES (1, '/p?a=1&a=2'), (2, '/p#x?a=3'), (3, NULL), (4, '/p')
+
+query IITT nosort
+SELECT urls.id, p.po, p.pn, p.pv
+FROM urls, LATERAL url_query_params(urls.u) AS p(po, pn, pv, pe)
+ORDER BY 1, 2
+----
+1  1  a  1
+1  2  a  2
+
+query IITTB nosort
+SELECT id, url_query_params.ordinal, url_query_params.name, url_query_params.value,
+       url_query_params.has_equals
+FROM urls CROSS JOIN LATERAL url_query_params(u)
+ORDER BY 1, 2
+----
+1  1  a  1  true
+1  2  a  2  true
+
+statement ok
+DROP TABLE urls
+
 subtest end
