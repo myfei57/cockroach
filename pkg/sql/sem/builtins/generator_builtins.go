@@ -294,6 +294,31 @@ var generators = map[string]builtinDefinition{
 			volatility.Stable,
 		),
 	),
+
+	"array_runs": makeBuiltin(genProps(),
+		makeGeneratorOverloadWithReturnType(
+			tree.ParamTypes{{Name: "input", Typ: types.AnyArray}},
+			func(args []tree.TypedExpr) *types.T {
+				if len(args) == 0 || args[0].ResolvedType().Family() != types.ArrayFamily {
+					return tree.UnknownReturnType
+				}
+				t := args[0].ResolvedType().ArrayContents()
+				return types.MakeLabeledTuple(
+					[]*types.T{t, types.Int, types.Int, types.Int},
+					arrayRunsValueGeneratorLabels,
+				)
+			},
+			makeArrayRunsGenerator,
+			"Splits a one-dimensional array into maximal runs of adjacent elements that "+
+				"are not distinct (using IS NOT DISTINCT FROM semantics, so NULLs are "+
+				"considered equal). Each returned row describes one run with the "+
+				"repeated value, the 1-based inclusive start_index and end_index, and "+
+				"the run length. Equal values separated by other values produce "+
+				"separate runs. An empty array or a NULL array produces no rows.",
+			volatility.Immutable,
+		),
+	),
+
 	"crdb_internal.scan": makeBuiltin(
 		tree.FunctionProperties{
 			Category:         builtinconstants.CategoryGenerator,
@@ -1722,6 +1747,107 @@ func (s *expandArrayValueGenerator) Values() (tree.Datums, error) {
 	// Expand array's index is 1 based.
 	s.buf[0] = s.avg.array.Array[s.avg.nextIndex]
 	s.buf[1] = tree.NewDInt(tree.DInt(s.avg.nextIndex + 1))
+	return s.buf[:], nil
+}
+
+func makeArrayRunsGenerator(
+	_ context.Context, evalCtx *eval.Context, args tree.Datums,
+) (eval.ValueGenerator, error) {
+	arr, err := checkIfDArrayErrOnDString(args[0])
+	if err != nil {
+		return nil, err
+	}
+	g := &arrayRunsValueGenerator{array: arr, evalCtx: evalCtx}
+	g.buf[1] = tree.NewDInt(tree.DInt(0))
+	g.buf[2] = tree.NewDInt(tree.DInt(0))
+	g.buf[3] = tree.NewDInt(tree.DInt(0))
+	return g, nil
+}
+
+// arrayRunsValueGenerator is a value generator that splits a one-dimensional
+// array into maximal runs of adjacent elements that are not distinct (IS NOT
+// DISTINCT FROM semantics). Each emitted row contains the run value followed
+// by the 1-based inclusive start and end indices and the run length.
+type arrayRunsValueGenerator struct {
+	array   *tree.DArray
+	evalCtx *eval.Context
+	// nextIndex is the 0-based index of the first element not yet assigned to
+	// an emitted run.
+	nextIndex int
+	// runStart/runEnd are the 0-based inclusive bounds of the current run.
+	runStart, runEnd int
+	// buf caches the DInt wrappers for the index columns.
+	buf [4]tree.Datum
+}
+
+var arrayRunsValueGeneratorLabels = []string{"value", "start_index", "end_index", "length"}
+
+// ResolvedType implements the eval.ValueGenerator interface.
+func (s *arrayRunsValueGenerator) ResolvedType() *types.T {
+	return types.MakeLabeledTuple(
+		[]*types.T{s.array.ParamTyp, types.Int, types.Int, types.Int},
+		arrayRunsValueGeneratorLabels,
+	)
+}
+
+// Start implements the eval.ValueGenerator interface.
+func (s *arrayRunsValueGenerator) Start(_ context.Context, _ *kv.Txn) error {
+	s.nextIndex = 0
+	s.runStart = 0
+	s.runEnd = -1
+	return nil
+}
+
+// Close implements the eval.ValueGenerator interface.
+func (s *arrayRunsValueGenerator) Close(_ context.Context) {}
+
+// datumsNotDistinct reports whether a and b are equal under IS NOT DISTINCT
+// FROM semantics: two NULLs are not distinct, a NULL and a non-NULL are
+// distinct, and otherwise the datums compare equal.
+func datumsNotDistinct(
+	ctx context.Context, cmpCtx tree.CompareContext, a, b tree.Datum,
+) (bool, error) {
+	if a == tree.DNull || b == tree.DNull {
+		return a == tree.DNull && b == tree.DNull, nil
+	}
+	cmp, err := a.Compare(ctx, cmpCtx, b)
+	if err != nil {
+		return false, err
+	}
+	return cmp == 0, nil
+}
+
+// Next implements the eval.ValueGenerator interface.
+func (s *arrayRunsValueGenerator) Next(ctx context.Context) (bool, error) {
+	n := s.array.Len()
+	if s.nextIndex >= n {
+		return false, nil
+	}
+	start := s.nextIndex
+	value := s.array.Array[start]
+	end := start
+	for end+1 < n {
+		equal, err := datumsNotDistinct(ctx, s.evalCtx, value, s.array.Array[end+1])
+		if err != nil {
+			return false, err
+		}
+		if !equal {
+			break
+		}
+		end++
+	}
+	s.runStart = start
+	s.runEnd = end
+	s.nextIndex = end + 1
+	return true, nil
+}
+
+// Values implements the eval.ValueGenerator interface.
+func (s *arrayRunsValueGenerator) Values() (tree.Datums, error) {
+	s.buf[0] = s.array.Array[s.runStart]
+	*s.buf[1].(*tree.DInt) = tree.DInt(s.runStart + 1)
+	*s.buf[2].(*tree.DInt) = tree.DInt(s.runEnd + 1)
+	*s.buf[3].(*tree.DInt) = tree.DInt(s.runEnd - s.runStart + 1)
 	return s.buf[:], nil
 }
 

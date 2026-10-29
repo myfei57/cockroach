@@ -561,6 +561,102 @@ c 1
 b 2
 a 3
 
+subtest arrayRuns
+
+query error pq: unknown signature: array_runs()
+SELECT * FROM array_runs()
+
+statement error could not determine polymorphic type
+SELECT * FROM array_runs(NULL)
+
+query IIII colnames,nosort
+SELECT * FROM array_runs(ARRAY[2, 2, NULL, NULL, 2])
+----
+value start_index end_index length
+2     1           2         2
+NULL  3           4         2
+2     5           5         1
+
+query T colnames,nosort
+SELECT array_runs(ARRAY[1, 1, 2])
+----
+array_runs
+(1,1,2,2)
+(2,3,3,1)
+
+query IIII colnames,nosort
+SELECT * FROM array_runs(ARRAY[7])
+----
+value start_index end_index length
+7     1           1         1
+
+query IIII colnames,nosort
+SELECT * FROM array_runs(ARRAY[4, 4, 4])
+----
+value start_index end_index length
+4     1           3         3
+
+query IIII colnames,nosort
+SELECT * FROM array_runs(ARRAY[NULL, NULL]::int[])
+----
+value start_index end_index length
+NULL  1           2         2
+
+query TIII colnames,nosort
+SELECT * FROM array_runs(ARRAY['a', 'a', 'b', 'a'])
+----
+value start_index end_index length
+a     1           2         2
+b     3           3         1
+a     4           4         1
+
+# Every element differs, so no runs are merged even if values repeat later.
+query IIII colnames,nosort
+SELECT * FROM array_runs(ARRAY[1, 2, 1, 2])
+----
+value start_index end_index length
+1     1           1         1
+2     2           2         1
+1     3           3         1
+2     4           4         1
+
+# An empty array produces no rows.
+query IIII colnames
+SELECT * FROM array_runs(ARRAY[]::int[])
+----
+value start_index end_index length
+
+# A NULL array produces no rows.
+query IIII colnames
+SELECT * FROM array_runs(NULL::int[])
+----
+value start_index end_index length
+
+statement ok
+CREATE TABLE array_runs_t(id INT PRIMARY KEY, arr INT[])
+
+statement ok
+INSERT INTO array_runs_t VALUES (1, ARRAY[1, 1, 2]), (2, ARRAY[]::INT[]), (3, NULL)
+
+query IIIII colnames,nosort
+SELECT id, value, start_index, end_index, length
+FROM array_runs_t, LATERAL array_runs(arr)
+----
+id value start_index end_index length
+1  1     1           2         2
+1  2     3           3         1
+
+# The element column keeps the input array's element type.
+query TTTT colnames
+SELECT column_name, data_type, udt_name, is_nullable
+FROM information_schema.columns
+WHERE table_name = 'array_runs_t'
+ORDER BY ordinal_position
+----
+column_name data_type udt_name is_nullable
+id          bigint    int8     YES
+arr         ARRAY     _int8    YES
+
 subtest srf_accessor
 
 query error pq: type int is not composite
