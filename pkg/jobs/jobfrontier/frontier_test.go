@@ -345,8 +345,10 @@ func TestGetAllResolvedSpans(t *testing.T) {
 			},
 			expected: []jobspb.ResolvedSpan{
 				{Span: sp1, Timestamp: ts1},
-				{Span: sp2},
-				{Span: sp3},
+				// sp2 and sp3 are both still at the zero timestamp, so the
+				// frontier coalesces their redundant boundary into a single
+				// contiguous span.
+				{Span: roachpb.Span{Key: sp2.Key, EndKey: sp3.EndKey}},
 			},
 		},
 		{

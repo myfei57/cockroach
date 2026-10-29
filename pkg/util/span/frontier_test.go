@@ -477,6 +477,116 @@ func TestBtreeFrontierMergesSpansDuringInitialization(t *testing.T) {
 	require.Equal(t, "{A-B}@8 {B-D}@10 {D-Z}@9", entriesStr(f))
 }
 
+// TestFrontierMergesBoundariesForDuplicateCheckpoint verifies that when a
+// checkpoint does not advance any timestamp (e.g. a duplicate span re-sent by
+// a rangefeed after a restart), the forward still coalesces redundant
+// boundaries between contiguous entries carrying the same timestamp.
+func TestFrontierMergesBoundariesForDuplicateCheckpoint(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	ts := func(wall int64) hlc.Timestamp {
+		return hlc.Timestamp{WallTime: wall}
+	}
+
+	t.Run("adjacent spans merge at zero timestamp", func(t *testing.T) {
+		f, err := MakeFrontier(makeSpan("A", "C"), makeSpan("C", "F"), makeSpan("F", "Z"))
+		require.NoError(t, err)
+		require.Equal(t, "{A-Z}@0", entriesStr(f), f)
+		_, _, err = checkContiguousFrontier(f)
+		require.NoError(t, err)
+	})
+
+	t.Run("adjacent spans merge at non-zero timestamp", func(t *testing.T) {
+		f, err := MakeFrontierAt(ts(5), makeSpan("A", "C"), makeSpan("C", "Z"))
+		require.NoError(t, err)
+		require.Equal(t, "{A-Z}@5", entriesStr(f), f)
+		_, _, err = checkContiguousFrontier(f)
+		require.NoError(t, err)
+	})
+
+	t.Run("duplicate checkpoint coalesces boundaries", func(t *testing.T) {
+		f, err := MakeFrontier(makeSpan("A", "C"), makeSpan("C", "Z"))
+		require.NoError(t, err)
+		require.Equal(t, "{A-Z}@0", entriesStr(f), f)
+
+		// Re-forwarding the whole tracked span at the same timestamp is a
+		// no-op timestamp-wise, but must keep the frontier canonical.
+		result, err := f.Forward(makeSpan("A", "Z"), ts(0))
+		require.NoError(t, err)
+		require.Equal(t, ForwardNoChange, result)
+		require.Equal(t, 1, f.Len(), f)
+		require.Equal(t, "{A-Z}@0", entriesStr(f), f)
+
+		// The same applies when a duplicate covers only one of the spans.
+		result, err = f.Forward(makeSpan("C", "Z"), ts(0))
+		require.NoError(t, err)
+		require.Equal(t, ForwardNoChange, result)
+		require.Equal(t, 1, f.Len(), f)
+		require.Equal(t, "{A-Z}@0", entriesStr(f), f)
+	})
+
+	t.Run("duplicate checkpoint leaves distinct timestamps alone", func(t *testing.T) {
+		f, err := MakeFrontier(makeSpan("A", "C"), makeSpan("C", "Z"))
+		require.NoError(t, err)
+
+		// Advance one half of the tracked span.
+		result, err := f.Forward(makeSpan("A", "C"), ts(5))
+		require.NoError(t, err)
+		require.True(t, result.FrontierForwarded())
+		require.Equal(t, "{A-C}@5 {C-Z}@0", entriesStr(f), f)
+
+		// A duplicate checkpoint at the same timestamp does not change the
+		// state, and the boundary stays because the neighbor differs.
+		result, err = f.Forward(makeSpan("A", "C"), ts(5))
+		require.NoError(t, err)
+		require.Equal(t, ForwardNoChange, result)
+		require.Equal(t, "{A-C}@5 {C-Z}@0", entriesStr(f), f)
+
+		// A strictly older checkpoint is likewise ignored without merging.
+		result, err = f.Forward(makeSpan("A", "C"), ts(3))
+		require.NoError(t, err)
+		require.Equal(t, ForwardNoChange, result)
+		require.Equal(t, "{A-C}@5 {C-Z}@0", entriesStr(f), f)
+
+		// Advancing the other half merges the boundary as usual.
+		result, err = f.Forward(makeSpan("C", "Z"), ts(5))
+		require.NoError(t, err)
+		require.Equal(t, ForwardResolvedTime, result)
+		require.Equal(t, "{A-Z}@5", entriesStr(f), f)
+		_, _, err = checkContiguousFrontier(f)
+		require.NoError(t, err)
+	})
+
+	t.Run("rangefeed restart with per-span checkpoints", func(t *testing.T) {
+		// A frontier resumed from a checkpoint whose spans are adjacent.
+		f, err := MakeFrontier(makeSpan("A", "F"), makeSpan("F", "P"), makeSpan("P", "Z"))
+		require.NoError(t, err)
+		require.Equal(t, "{A-Z}@0", entriesStr(f), f)
+
+		// Checkpoints arrive for individual sub-spans, possibly duplicated.
+		require.Equal(t, ForwardNoChange, forwardResult(t, f, makeSpan("A", "F"), 0))
+		require.Equal(t, ForwardResolvedTime, forwardResult(t, f, makeSpan("A", "F"), 5))
+		require.Equal(t, ForwardSpan, forwardResult(t, f, makeSpan("P", "Z"), 5))
+		// Duplicate of a checkpoint already seen at the same timestamp.
+		require.Equal(t, ForwardNoChange, forwardResult(t, f, makeSpan("A", "F"), 5))
+		require.Equal(t, ForwardNoChange, forwardResult(t, f, makeSpan("P", "Z"), 5))
+		require.Equal(t, "{A-F}@5 {F-P}@0 {P-Z}@5", entriesStr(f), f)
+
+		// The middle sub-span catches up; the redundant boundaries coalesce.
+		require.Equal(t, ForwardResolvedTime, forwardResult(t, f, makeSpan("F", "P"), 5))
+		require.Equal(t, "{A-Z}@5", entriesStr(f), f)
+		_, _, err = checkContiguousFrontier(f)
+		require.NoError(t, err)
+	})
+}
+
+func forwardResult(t *testing.T, f Frontier, s roachpb.Span, wall int64) ForwardResult {
+	t.Helper()
+	result, err := f.Forward(s, hlc.Timestamp{WallTime: wall})
+	require.NoError(t, err)
+	return result
+}
+
 // Regression for #115411
 func TestForwardDeepNestedFrontierEntry(t *testing.T) {
 	defer leaktest.AfterTest(t)()

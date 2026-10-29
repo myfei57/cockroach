@@ -508,9 +508,26 @@ func (f *btreeFrontier) forward(
 			}
 		}
 
-		// Fast case: we already recorded higher timestamp for this overlap.
+		// Fast case: we already recorded a timestamp at or ahead of insertTS
+		// for this overlap, so the timestamp does not advance (e.g. a
+		// duplicate checkpoint span re-delivered by a rangefeed restart).
 		if insertTS.LessEq(overlap.ts) {
-			todoEntry.Start = overlap.End
+			end := overlap.End
+			if insertTS.Equal(overlap.ts) {
+				// Even though the timestamp does not advance, the overlap can
+				// sit next to contiguous entries that already carry the same
+				// timestamp (this happens, for example, when adjacent spans
+				// are added at the same timestamp). Coalesce those redundant
+				// boundaries to keep the frontier canonical. NB: mergeEntries
+				// invalidates it, but a fresh iterator is created on the next
+				// iteration of this loop.
+				merged, err := f.mergeEntries(overlap)
+				if err != nil {
+					return false, err
+				}
+				end = merged.End
+			}
+			todoEntry.Start = end
 			continue
 		}
 
